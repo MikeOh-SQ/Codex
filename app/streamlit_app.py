@@ -19,9 +19,9 @@ APP_TITLE = "Agent Builder (Agents SDK) Chat"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_PROJECT = os.getenv("OPENAI_PROJECT")  # proj_...
-WORKFLOW_OR_AGENT_ID = os.getenv("OPENAI_AGENT_ID") or os.getenv("OPENAI_WORKFLOW_ID")  # wf_... 또는 agt_...
+WORKFLOW_OR_AGENT_ID = os.getenv("OPENAI_AGENT_ID") or os.getenv("OPENAI_WORKFLOW_ID")  # wf_/agt_
 
-# 모델은 계정에서 사용 가능한 것으로 지정(보통 gpt-4.1-mini 안전)
+# 사용 가능한 모델로 지정(계정 접근 가능한 모델)
 BASE_MODEL = os.getenv("OPENAI_BASE_MODEL", "gpt-4.1-mini")
 
 # OpenAI 클라이언트(프로젝트 강제 지정; 키와 같은 프로젝트여야 함)
@@ -33,11 +33,10 @@ if OPENAI_API_KEY:
 # -------------------- Streamlit UI --------------------
 st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide")
 st.title(APP_TITLE)
-st.caption("Agents SDK의 Runner로 워크플로우(또는 에이전트)를 실행합니다. Responses.create의 session_id는 사용하지 않습니다.")
+st.caption("Agents SDK의 Runner로 워크플로/에이전트를 실행합니다. Responses.create의 session_id는 사용하지 않습니다.")
 
 # 세션 상태 초기화
 if "history" not in st.session_state:
-    # [{"role": "user"|"assistant", "content": "..."}, ...]
     st.session_state.history: List[Dict[str, str]] = []
 if "local_session_id" not in st.session_state:
     st.session_state.local_session_id = str(uuid.uuid4())
@@ -80,13 +79,14 @@ base_agent = Agent(
     model=BASE_MODEL,
 )
 
+# ✅ Runner 생성자는 인자 없이!
+runner = Runner()
+
 def run_agent(user_text: str) -> str:
     """
-    Agents SDK Runner로 워크플로 실행.
-    - 워크플로/에이전트 호출은 Runner로 수행
-    - workflow_id는 trace_metadata로 전달 (Agent Builder 'Get code' 흐름)
+    Agents SDK Runner로 실행.
+    - workflow_id는 run_config.trace_metadata로 전달
     """
-    # 대화 입력(이번 턴만; 필요 시 과거 턴 누적도 가능)
     input_items = [
         {
             "role": "user",
@@ -94,21 +94,17 @@ def run_agent(user_text: str) -> str:
         }
     ]
 
-    # Runner 생성 후 실행
-    runner = Runner(
-        trace_metadata={
-            "__trace_source__": "agent-builder",
-            "workflow_id": WORKFLOW_OR_AGENT_ID,  # ★ 핵심: wf_/agt_ 식별자 전달
-            # 참고: 필요하면 여기 추가 메타데이터 넣을 수 있음
-        }
-    )
-
     result = runner.run(
         base_agent,
         input_items,
+        run_config={
+            "trace_metadata": {
+                "__trace_source__": "agent-builder",
+                "workflow_id": WORKFLOW_OR_AGENT_ID,  # ★ 핵심: wf_/agt_ 식별자 전달
+            }
+        },
     )
 
-    # SDK 버전에 따라 final_output 또는 finalOutput가 있을 수 있어 모두 확인
     final = getattr(result, "final_output", None) or getattr(result, "finalOutput", None) or ""
     return final.strip()
 
@@ -121,7 +117,6 @@ for m in st.session_state.history:
 prompt = st.chat_input("메시지를 입력하세요…")
 
 if prompt:
-    # 사용자 메시지 렌더/저장
     st.session_state.history.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
