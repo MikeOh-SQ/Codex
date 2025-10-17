@@ -59,14 +59,14 @@ def _history_to_messages(history: List[Dict[str, str]], new_user_text: str) -> L
 def _call_agent_minimal(client: OpenAI, agent_id: str, user_text: str) -> str:
     """필수 인자만으로 간단 호출 (콘텐츠 타입 고정)"""
     resp = client.responses.create(
-        model=agent_id,
+        model="wf_68f0b0ef88088190abb547e69c16dfae0c8fcfb76c043f19",
         input=[{"role": "user", "content": [{"type": "input_text", "text": user_text}]}],
     )
     return _extract_text(resp)
 
 
 def _call_agent_with_history(client: OpenAI, agent_id: str, messages: List[Dict[str, Any]]) -> str:
-    resp = client.responses.create(model=agent_id, input=messages)
+    resp = client.responses.create(model="wf_68f0b0ef88088190abb547e69c16dfae0c8fcfb76c043f19", input=messages)
     return _extract_text(resp)
 
 
