@@ -1,158 +1,133 @@
-"""Streamlit entry point for interacting with an OpenAI Agent Builder agent (fixed content types)."""
+# app.py — Streamlit x OpenAI Agents SDK (Runner 방식)
 from __future__ import annotations
-
 import os
 import uuid
-from typing import Any, List, Dict
+from typing import Any, Dict, List
 
 import streamlit as st
-from openai import OpenAI
+from dotenv import load_dotenv
 
+# Agents SDK
+from agents import Agent, Runner, SQLiteSession
+from agents import set_default_openai_client, set_default_openai_key
+from openai import AsyncOpenAI
 
-def _build_client() -> OpenAI | None:
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    return OpenAI(api_key=api_key)
+load_dotenv()  # .env 사용 시
 
+# ---- 기본 설정 ----
+APP_TITLE = "Agent Builder (Agents SDK) Chat"
+WORKFLOW_ID = os.getenv("OPENAI_AGENT_ID") or os.getenv("OPENAI_WORKFLOW_ID")  # wf_/agt_ 모두 허용
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_PROJECT = os.getenv("OPENAI_PROJECT")  # proj_...
 
-def _extract_text(response: Any) -> str:
-    if response is None:
-        return ""
+# OpenAI 클라이언트(프로젝트 강제 지정 — 키와 같은 프로젝트여야 함)
+if OPENAI_API_KEY:
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY, project=OPENAI_PROJECT)
+    set_default_openai_client(client)
+    set_default_openai_key(OPENAI_API_KEY)
 
-    output_text = getattr(response, "output_text", None)
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text
+# ---- Streamlit UI ----
+st.set_page_config(page_title=APP_TITLE, page_icon="🤖", layout="wide")
+st.title(APP_TITLE)
+st.caption("Agents SDK의 Runner로 워크플로(또는 에이전트)를 실행합니다. (session_id 미사용)")
 
-    chunks: List[str] = []
-    for item in getattr(response, "output", []) or []:
-        if getattr(item, "type", None) != "message":
-            continue
-        for c in getattr(item, "content", []) or []:
-            if getattr(c, "type", None) == "output_text":
-                t = getattr(c, "text", "")
-                if t:
-                    chunks.append(t)
-    return "".join(chunks)
+# 세션 상태 초기화
+if "chat_session" not in st.session_state:
+    # SQLiteSession: 자동으로 히스토리 저장/복원
+    st.session_state.chat_session = SQLiteSession(session_id=str(uuid.uuid4()))
+if "history" not in st.session_state:
+    st.session_state.history: List[Dict[str, str]] = []
 
+# 사이드바: 디버그/설정
+with st.sidebar:
+    st.header("Configuration")
+    st.write("**OPENAI_API_KEY set?**", bool(OPENAI_API_KEY))
+    st.write("**OPENAI_PROJECT**", OPENAI_PROJECT or "(empty)")
+    st.write("**WORKFLOW/AGENT ID**", WORKFLOW_ID or "(empty)")
 
-def _history_to_messages(history: List[Dict[str, str]], new_user_text: str) -> List[Dict[str, Any]]:
-    """
-    Responses API 요구 형식:
-      - user 메시지:  type="input_text"
-      - assistant 메시지: type="output_text"
-    """
-    msgs: List[Dict[str, Any]] = []
-    for m in history:
-        role = m.get("role", "user")
-        text = m.get("content", "")
-        if role == "assistant":
-            msgs.append({"role": "assistant", "content": [{"type": "output_text", "text": text}]})
-        else:
-            msgs.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
-
-    # 새 유저 입력
-    msgs.append({"role": "user", "content": [{"type": "input_text", "text": new_user_text}]})
-    return msgs
-
-
-def _call_agent_minimal(client: OpenAI, agent_id: str, user_text: str) -> str:
-    """필수 인자만으로 간단 호출 (콘텐츠 타입 고정)"""
-    resp = client.responses.create(
-        model=agent_id,
-        input=[{"role": "user", "content": [{"type": "input_text", "text": user_text}]}],
+    st.markdown(
+        """
+        **필수 조건**
+        1) `OPENAI_API_KEY`는 **워크플로가 속한 같은 프로젝트**에서 발급  
+        2) `OPENAI_PROJECT=proj_...` 도 같은 프로젝트  
+        3) `OPENAI_AGENT_ID` 는 `wf_...` 또는 `agt_...` 그대로
+        """
     )
-    return _extract_text(resp)
 
-
-def _call_agent_with_history(client: OpenAI, agent_id: str, messages: List[Dict[str, Any]]) -> str:
-    resp = client.responses.create(model=agent_id, input=messages)
-    return _extract_text(resp)
-
-
-def _init_session_state() -> None:
-    if "session_guid" not in st.session_state:
-        st.session_state.session_guid = str(uuid.uuid4())
-    if "history" not in st.session_state:
+    if st.button("Reset conversation", type="secondary"):
+        st.session_state.chat_session = SQLiteSession(session_id=str(uuid.uuid4()))
         st.session_state.history = []
-
-
-def main() -> None:
-    st.set_page_config(page_title="Agent Builder Chat", page_icon="🤖", layout="wide")
-
-    st.title("OpenAI Agent Builder Chat")
-    st.caption("Responses API: use input_text/output_text content types (no session_id).")
-
-    _init_session_state()
-
-    client = _build_client()
-    agent_id = os.getenv("OPENAI_AGENT_ID", "").strip()
-
-    with st.sidebar:
-        st.header("Configuration")
-        st.markdown(
-            """
-            Environment variables:
-            - `OPENAI_API_KEY`
-            - `OPENAI_AGENT_ID` (Agent/Workflow ID)
-            """
-        )
-
-        if not client:
-            st.error("Missing `OPENAI_API_KEY`.")
-        if not agent_id:
-            st.warning("`OPENAI_AGENT_ID` is empty.")
-
-        if st.button("Reset conversation", type="secondary"):
-            st.session_state.history = []
-            st.session_state.session_guid = str(uuid.uuid4())
-            try:
-                st.rerun()
-            except Exception:
-                st.experimental_rerun()
-
-        st.divider()
-        st.subheader("Minimal test")
-        if st.button("Ping agent"):
-            try:
-                reply = _call_agent_minimal(client, agent_id, "ping")
-                st.success("Minimal call OK")
-                st.code(reply or "(no text)")
-            except Exception as e:
-                st.error(f"Minimal call failed: {e}")
-
-    if not (client and agent_id):
-        st.info("Add credentials to chat.")
-        return
-
-    st.subheader("Chat with your agent")
-    prompt = st.chat_input("Send a message to your agent…")
-
-    # render history
-    for m in st.session_state.history:
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
-
-    if prompt:
-        st.session_state.history.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
         try:
-            with st.chat_message("assistant"):
-                with st.spinner("Waiting for the agent's response…"):
-                    messages = _history_to_messages(st.session_state.history[:-1], prompt)
-                    reply = _call_agent_with_history(client, agent_id, messages)
-                    if not reply:
-                        reply = "(The agent did not return any text.)"
-                    st.markdown(reply)
-        except Exception as exc:
-            err = f"Failed to reach the Agent Builder API: {exc}"
-            st.session_state.history.append({"role": "assistant", "content": err})
-            st.error(err)
-        else:
-            st.session_state.history.append({"role": "assistant", "content": reply})
+            st.rerun()
+        except Exception:
+            st.experimental_rerun()
 
+# 가드: 인증/ID 미설정 시 안내
+if not OPENAI_API_KEY or not WORKFLOW_ID:
+    st.info("환경변수 `OPENAI_API_KEY`, `OPENAI_PROJECT`, `OPENAI_AGENT_ID(wf_/agt_)`를 설정해 주세요.")
+    st.stop()
 
-if __name__ == "__main__":
-    main()
+# 에이전트 정의(Builder의 예시와 유사)
+base_agent = Agent(
+    name="My agent",
+    instructions="You are a helpful assistant.",
+    model="gpt-5",  # Builder 코드와 동일한 기본 모델명
+    model_settings={"reasoning": {"effort": "low", "summary": "auto"}, "store": True},
+)
+
+# 채팅 UI
+st.subheader("Chat")
+for m in st.session_state.history:
+    with st.chat_message(m["role"]):
+        st.markdown(m["content"])
+
+prompt = st.chat_input("메시지를 입력하세요…")
+
+def run_agent(user_text: str) -> str:
+    """
+    Agents SDK Runner로 워크플로 실행.
+    - 대화 히스토리는 SQLiteSession이 자동 관리
+    - workflow_id는 trace_metadata로 전달 (Agent Builder 'Get code' 예시와 동일 패턴)
+    """
+    input_items = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": user_text}],
+        }
+    ]
+    result = Runner.run_sync(
+        base_agent,
+        input_items,
+        session=st.session_state.chat_session,
+        run_config={
+            "trace_metadata": {
+                "__trace_source__": "agent-builder",
+                "workflow_id": WORKFLOW_ID,  # ★ 핵심: 워크플로 식별자 전달
+            },
+            # 필요시 공통 모델/세팅 오버라이드:
+            # "model": "gpt-5-mini",
+            # "model_settings": {"temperature": 0.2},
+        },
+    )
+    # 최종 텍스트(없을 땐 빈 문자열)
+    return (result.final_output or "").strip()
+
+if prompt:
+    # 사용자 메시지 표시/저장
+    st.session_state.history.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    try:
+        with st.chat_message("assistant"):
+            with st.spinner("Agent 실행 중…"):
+                reply = run_agent(prompt)
+                if not reply:
+                    reply = "(no output_text)"
+                st.markdown(reply)
+    except Exception as e:
+        err = f"Agent run failed: {e}"
+        st.session_state.history.append({"role": "assistant", "content": err})
+        st.error(err)
+    else:
+        st.session_state.history.append({"role": "assistant", "content": reply})
