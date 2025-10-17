@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from typing import Any, List
+from typing import Any, List, Dict
 
 import streamlit as st
 from openai import OpenAI
@@ -22,14 +22,13 @@ def _extract_text(response: Any) -> str:
     if response is None:
         return ""
 
-    text_chunks: List[str] = []
-
     # The latest OpenAI SDK exposes `output_text` for convenience.
     output_text = getattr(response, "output_text", None)
     if isinstance(output_text, str) and output_text.strip():
         return output_text
 
     # Fallback for structured responses.
+    text_chunks: List[str] = []
     for item in getattr(response, "output", []) or []:
         if getattr(item, "type", None) != "message":
             continue
@@ -42,30 +41,45 @@ def _extract_text(response: Any) -> str:
     return "".join(text_chunks)
 
 
-def _call_agent(client: OpenAI, agent_id: str, session_id: str, prompt: str) -> str:
-    """Send a prompt to the Agent Builder API and return the generated reply."""
-    response = client.responses.create(
-        model=agent_id,
-        input=[
+def _history_to_messages(history: List[Dict[str, str]], new_user_text: str) -> List[Dict[str, Any]]:
+    """Convert local chat history + new user text into Responses API `input` format."""
+    messages: List[Dict[str, Any]] = []
+    for m in history:
+        # keep only roles user/assistant and plain text content
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        messages.append(
             {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt,
-                    }
-                ],
+                "role": role,
+                "content": [{"type": "text", "text": content}],
             }
-        ],
-        session_id=session_id,
+        )
+    # append the new user prompt
+    messages.append(
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": new_user_text}],
+        }
+    )
+    return messages
+
+
+def _call_agent(client: OpenAI, agent_id: str, messages: List[Dict[str, Any]]) -> str:
+    """Send messages to the Agent Builder API and return the generated reply."""
+    response = client.responses.create(
+        model=agent_id,   # <- OPENAI_AGENT_ID 또는 Workflow/Agent ID
+        input=messages,   # <- 누적 히스토리 + 새 유저 입력
+        # ❌ session_id는 Responses.create에서 지원하지 않으므로 절대 넣지 말 것
     )
     return _extract_text(response)
 
 
 def _init_session_state() -> None:
     if "session_id" not in st.session_state:
+        # 로컬(클라이언트) 기준 세션 식별자 — API로는 보내지 않음
         st.session_state.session_id = str(uuid.uuid4())
     if "history" not in st.session_state:
+        # [{"role": "user"|"assistant", "content": "텍스트"}] 형태로 저장
         st.session_state.history = []
 
 
@@ -102,17 +116,22 @@ def main() -> None:
         if st.button("Reset conversation", type="secondary"):
             st.session_state.history = []
             st.session_state.session_id = str(uuid.uuid4())
-            st.experimental_rerun()
+            try:
+                st.rerun()  # 최신 스트림릿
+            except Exception:
+                st.experimental_rerun()  # 구버전 호환
 
     if client and agent_id:
         st.subheader("Chat with your agent")
         prompt = st.chat_input("Send a message to your agent…")
 
+        # render previous messages
         for message in st.session_state.history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
         if prompt:
+            # echo user message
             st.session_state.history.append({"role": "user", "content": prompt})
             with st.chat_message("user"):
                 st.markdown(prompt)
@@ -120,11 +139,12 @@ def main() -> None:
             try:
                 with st.chat_message("assistant"):
                     with st.spinner("Waiting for the agent's response…"):
-                        reply = _call_agent(client, agent_id, st.session_state.session_id, prompt)
+                        messages = _history_to_messages(st.session_state.history[:-1], prompt)
+                        reply = _call_agent(client, agent_id, messages)
                         if not reply:
                             reply = "(The agent did not return any text.)"
                         st.markdown(reply)
-            except Exception as exc:  # noqa: BLE001 - surface the exception to the user via UI.
+            except Exception as exc:  # noqa: BLE001
                 error_message = f"Failed to reach the Agent Builder API: {exc}"
                 st.session_state.history.append({"role": "assistant", "content": error_message})
                 st.error(error_message)
