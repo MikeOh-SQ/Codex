@@ -1,0 +1,4 @@
+openai>=1.50,<2
+openai-agents
+streamlit
+python-dotenv
